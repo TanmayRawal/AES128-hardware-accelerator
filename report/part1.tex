@@ -1,0 +1,314 @@
+% ============================================================
+% PART 1: Preamble, Title Page, Student Details, Sec 1 & 2
+% ============================================================
+\documentclass[12pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[a4paper, top=1in, bottom=1in, left=1.25in, right=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{setspace}
+\usepackage{parskip}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, calc}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage{microtype}
+\usepackage{fontenc}
+\usepackage{inputenc}
+\usepackage{lmodern}
+
+% --- Hyperref setup ---
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=green!50!black,
+    urlcolor=blue!80!black,
+    pdftitle={AES-128 FPGA Image Encryption IP Core},
+    pdfauthor={Tanmay Rawal}
+}
+
+% --- Header/Footer ---
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small AES-128 FPGA Image Encryption IP Core}
+\fancyhead[R]{\small Tanmay Rawal | 23DEC511}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% --- Section title formatting ---
+\titleformat{\section}{\large\bfseries\color{blue!70!black}}{{\thesection.}}{0.5em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries\color{blue!50!black}}{{\thesubsection}}{0.5em}{}
+
+% --- Code listing style ---
+\lstdefinestyle{verilogstyle}{
+    language=Verilog,
+    backgroundcolor=\color{gray!8},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{blue!80!black}\bfseries,
+    commentstyle=\color{green!50!black}\itshape,
+    stringstyle=\color{red!70!black},
+    numberstyle=\tiny\color{gray},
+    numbers=left,
+    stepnumber=1,
+    frame=single,
+    breaklines=true,
+    captionpos=b,
+    tabsize=4,
+    showstringspaces=false
+}
+\lstdefinestyle{cstyle}{
+    language=C,
+    backgroundcolor=\color{gray!8},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{blue!80!black}\bfseries,
+    commentstyle=\color{green!50!black}\itshape,
+    stringstyle=\color{red!70!black},
+    numberstyle=\tiny\color{gray},
+    numbers=left,
+    stepnumber=1,
+    frame=single,
+    breaklines=true,
+    captionpos=b,
+    tabsize=4,
+    showstringspaces=false
+}
+\lstdefinestyle{tclstyle}{
+    language=tcl,
+    backgroundcolor=\color{gray!8},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{purple!80!black}\bfseries,
+    commentstyle=\color{green!50!black}\itshape,
+    numberstyle=\tiny\color{gray},
+    numbers=left,
+    frame=single,
+    breaklines=true,
+    captionpos=b,
+    tabsize=4,
+    showstringspaces=false
+}
+
+% --- Path for images ---
+\graphicspath{{../report_images/}}
+
+% ============================================================
+\begin{document}
+
+% ============================================================
+% TITLE PAGE
+% ============================================================
+\begin{titlepage}
+\centering
+
+\vspace*{0.5cm}
+
+{\LARGE\bfseries Design, FPGA Implementation and Analysis of\\[0.4em]
+an AES-128 Image Encryption IP Core\\[0.4em]
+on Nexys 4 DDR\par}
+
+\vspace{1.5cm}
+
+{\normalsize Project report submitted in partial fulfillment\\
+of the requirements for the degree of\par}
+
+\vspace{0.8cm}
+
+{\large\itshape Bachelor of Technology\\
+in\\
+Electronics and Communication Engineering\par}
+
+\vspace{1.2cm}
+
+{\normalsize by\par}
+
+\vspace{0.5cm}
+
+{\large\bfseries Tanmay Rawal\\
+Roll No-23DEC511\par}
+
+\vspace{0.8cm}
+
+{\normalsize Under Guidance of\par}
+\vspace{0.3cm}
+{\large\bfseries Dr.\ Kusum Lata\\}
+{\normalsize Professor\\
+Electronics and Communication Engineering\par}
+
+\vspace{1.2cm}
+
+\includegraphics[width=5cm]{lnmiit_logo.png}
+
+\vspace{1cm}
+
+{\normalsize Department of Electronics and Communication Engineering\\
+The LNM Institute of Information Technology, Jaipur\par}
+
+\vspace{1.0cm}
+
+{\large April 27, 2026}
+
+\end{titlepage}
+
+% ============================================================
+% STUDENT DETAILS
+% ============================================================
+\newpage
+\thispagestyle{plain}
+\vspace*{1cm}
+
+{\large\bfseries\color{blue!70!black} Student Details}\\[0.5em]
+\begin{tabular}{ll}
+\toprule
+\textbf{Field} & \textbf{Detail} \\
+\midrule
+Name            & Tanmay Rawal \\
+Roll Number     & 23DEC511 \\
+Department      & Electronics and Communication Engineering \\
+Email           & 23dec511@lnmiit.ac.in \\
+Programme       & Bachelor of Technology (B.Tech) \\
+Institution     & The LNM Institute of Information Technology, Jaipur \\
+Project Guide   & Dr.\ Kusum Lata, Professor, ECE \\
+Submission Date & April 27, 2026 \\
+\bottomrule
+\end{tabular}
+
+\vspace{2cm}
+
+% ============================================================
+% TABLE OF CONTENTS
+% ============================================================
+\newpage
+\tableofcontents
+\newpage
+\listoffigures
+\newpage
+
+% ============================================================
+% SECTION 1: OBJECTIVE
+% ============================================================
+\section{Objective}
+
+The primary objective of this project is to \textbf{design, implement, and validate a custom AES-128 (Advanced Encryption Standard -- 128-bit key) hardware IP core} for real-time image encryption on the Digilent Nexys 4 DDR FPGA board.
+
+\subsection{Primary Goals}
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{RTL Design:} Implement a fully FIPS-197 compliant AES-128 encryption engine in Verilog-2001, complete with combinational key expansion, S-box lookup, and all four round operations (SubBytes, ShiftRows, MixColumns, AddRoundKey).
+    
+    \item \textbf{AXI4-Lite Integration:} Wrap the AES core with an AXI4-Lite slave interface to enable seamless integration into a Xilinx MicroBlaze soft-processor SoC, exposing all cryptographic registers via a memory-mapped register file.
+    
+    \item \textbf{Hardware-Software Co-Design:} Develop embedded C firmware on the MicroBlaze processor that implements AES-128 in \textbf{Counter (CTR) mode} to encrypt a 64$\times$64 pixel (4,096 byte) grayscale image across 256 blocks in real time.
+    
+    \item \textbf{JTAG-Based Validation:} Establish a non-intrusive, JTAG-only memory extraction pipeline using Xilinx XSCT scripting to bypass physical UART hardware limitations and directly inspect on-chip BRAM contents.
+    
+    \item \textbf{Cryptographic Analysis Dashboard:} Build a fully automated real-time HTML visualization dashboard using Python and JavaScript that extracts hardware memory, renders plaintext and ciphertext images side-by-side, and performs NIST-level statistical randomness tests.
+    
+    \item \textbf{Statistical Verification:} Quantitatively verify the security of the hardware output using Shannon Entropy, Bit Balance, Chi-Square Goodness-of-Fit, pixel distribution histograms, and keystream extraction.
+\end{enumerate}
+
+\subsection{Expected Outcomes}
+
+\begin{itemize}[leftmargin=*]
+    \item A working AES-128 IP core on silicon achieving 12-cycle latency per 128-bit block.
+    \item Measured ciphertext entropy $\geq$ 7.90 bits/byte (theoretical maximum: 8.0).
+    \item Near-perfect bit balance ($\approx$50\% ones, 50\% zeros) in the ciphertext.
+    \item Chi-Square score close to the ideal value of 255.0 for a uniform distribution over 256 symbols.
+    \item A complete, reproducible validation workflow runnable with a single Python command.
+\end{itemize}
+
+% ============================================================
+% SECTION 2: TOOLS AND RESOURCES USED
+% ============================================================
+\section{Tools and Resources Used}
+
+\subsection{Development Hardware}
+
+\begin{table}[H]
+\centering
+\caption{Hardware Platform Specifications}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Item} & \textbf{Specification} \\
+\midrule
+Development Board      & Digilent Nexys 4 DDR \\
+FPGA Device            & Xilinx Artix-7, xc7a100tcsg324-1, Speed Grade -1 \\
+Logic Cells            & 101,440 \\
+Look-Up Tables (LUTs)  & 63,400 \\
+Flip-Flops             & 126,800 \\
+Block RAM              & 4,860 Kb (135 × 36Kb tiles) \\
+DSP Slices             & 240 \\
+System Clock           & 100 MHz (on-board oscillator) \\
+I/O Interface          & USB-UART via FT2232HQ, JTAG via USB \\
+On-Board Memory        & 128 MB DDR2 RAM \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Design Software}
+
+\begin{table}[H]
+\centering
+\caption{Software Tools Used}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Tool} & \textbf{Purpose} \\
+\midrule
+Vivado 2024.2           & FPGA synthesis, implementation, bitstream generation, block design \\
+Vitis 2024.2            & Embedded C software development, application build, FPGA programming \\
+XSCT (Xilinx Software Command-line Tool) & JTAG-based memory read/write, hardware debugging \\
+Python 3.x (Anaconda)   & Dashboard automation, BRAM data extraction, HTML generation \\
+Web Browser             & Real-time cryptographic analysis dashboard rendering \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Languages Used}
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Verilog-2001} --- RTL design of AES-128 core and AXI4-Lite wrapper
+    \item \textbf{C (C99)} --- MicroBlaze embedded firmware (CTR mode encryption, GPIO control)
+    \item \textbf{Tcl} --- XSCT automation scripts (BRAM load, memory dump, verification)
+    \item \textbf{Python 3} --- Dashboard automation, base64 encoding, HTML generation
+    \item \textbf{HTML / CSS / JavaScript} --- Real-time cryptographic analysis dashboard
+\end{itemize}
+
+\subsection{IP Cores Used}
+
+\begin{table}[H]
+\centering
+\caption{Xilinx IP Cores Used in Block Design}
+\begin{tabularx}{\textwidth}{llX}
+\toprule
+\textbf{IP Core} & \textbf{Instance Name} & \textbf{Function} \\
+\midrule
+MicroBlaze Soft Processor      & microblaze\_0        & 32-bit RISC processor executing CTR encryption firmware \\
+AXI Interconnect               & microblaze\_0\_axi\_periph & Routes AXI transactions to peripheral slaves \\
+AXI BRAM Controller            & axi\_bram\_ctrl\_0   & Interfaces MicroBlaze to Input BRAM (0xC0000000) \\
+AXI BRAM Controller            & axi\_bram\_ctrl\_1   & Interfaces MicroBlaze to Output BRAM (0xC2000000) \\
+Block Memory Generator         & blk\_mem\_gen\_0     & 4096-byte Input BRAM (plaintext storage) \\
+Block Memory Generator         & blk\_mem\_gen\_1     & 4096-byte Output BRAM (ciphertext storage) \\
+AXI GPIO                       & axi\_gpio\_0         & Controls 3 LEDs (status) and reads 2 buttons (BTNC/BTND) \\
+AXI UART Lite                  & axi\_uartlite\_0     & UART interface (present in design; bypassed due to pin issue) \\
+\textbf{Custom: AES-128 AXI-Lite}  & \textbf{aes128\_axilite\_0} & \textbf{Custom AES-128 encryption IP core (this project)} \\
+MicroBlaze Debug Module (MDM)  & mdm\_1               & JTAG-based debug interface \\
+Clocking Wizard                & clk\_wiz             & Generates stable system clock from on-board 100 MHz oscillator \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\end{document}

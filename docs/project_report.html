@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AES-128 Image Encryption on FPGA - Project Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #2563eb;
+            --secondary: #3b82f6;
+            --bg: #f8fafc;
+            --text: #1e293b;
+            --card-bg: #ffffff;
+            --accent: #6366f1;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+        }
+
+        header {
+            background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
+            color: white;
+            padding: 4rem 2rem;
+            text-align: center;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 2.5rem;
+            font-weight: 700;
+            letter-spacing: -0.025em;
+        }
+
+        header p {
+            font-size: 1.25rem;
+            opacity: 0.9;
+            max-width: 800px;
+            margin: 1rem auto 0;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: -3rem auto 4rem;
+            padding: 0 2rem;
+        }
+
+        section {
+            background: var(--card-bg);
+            padding: 2.5rem;
+            border-radius: 1rem;
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+            margin-bottom: 2rem;
+        }
+
+        h2 {
+            color: var(--primary);
+            border-bottom: 2px solid #e2e8f0;
+            padding-bottom: 0.5rem;
+            margin-top: 0;
+            font-size: 1.75rem;
+        }
+
+        h3 {
+            color: var(--text);
+            font-size: 1.25rem;
+            margin-top: 2rem;
+        }
+
+        p {
+            margin-bottom: 1.25rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .card {
+            border: 1px solid #e2e8f0;
+            padding: 1.5rem;
+            border-radius: 0.75rem;
+            background: #f1f5f9;
+        }
+
+        .card h4 {
+            margin: 0 0 0.5rem 0;
+            color: var(--primary);
+        }
+
+        code {
+            font-family: 'Fira Code', monospace;
+            background: #f1f5f9;
+            padding: 0.2rem 0.4rem;
+            border-radius: 0.25rem;
+            font-size: 0.9em;
+        }
+
+        .diagram {
+            text-align: center;
+            padding: 2rem;
+            background: #f8fafc;
+            border: 2px dashed #cbd5e1;
+            border-radius: 0.75rem;
+            margin: 1.5rem 0;
+            font-weight: 600;
+            color: #64748b;
+        }
+
+        ul {
+            padding-left: 1.5rem;
+        }
+
+        li {
+            margin-bottom: 0.5rem;
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: #64748b;
+            font-size: 0.875rem;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            background: #dbeafe;
+            color: #1e40af;
+            margin-bottom: 1rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 0.75rem;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        th {
+            background: #f8fafc;
+            color: var(--primary);
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>AES-128 Image Encryption on FPGA</h1>
+    <p>A High-Performance Hardware-Software Co-Design for Secure Visual Data Transmission</p>
+</header>
+
+<div class="container">
+    <section>
+        <h2>1. Executive Summary</h2>
+        <p>
+            This project implements a complete <strong>System-on-Chip (SoC)</strong> on the Nexys 4 DDR FPGA platform to encrypt image data using the Advanced Encryption Standard (AES-128). 
+            The architecture utilizes a hybrid approach: a <strong>MicroBlaze Soft-Core Processor</strong> manages system control and data handling, while a <strong>Custom AES IP Core</strong> handles the computationally intensive cryptographic operations in hardware.
+        </p>
+    </section>
+
+    <section>
+        <h2>2. System Architecture</h2>
+        <p>The design is based on the <strong>AMBA AXI4 Interconnect</strong>, the industry-standard bus for FPGA systems. The primary components are:</p>
+        
+        <div class="grid">
+            <div class="card">
+                <h4>MicroBlaze CPU</h4>
+                <p>A 32-bit RISC processor that acts as the system controller. It executes C code to manage UART communication and AES control signals.</p>
+            </div>
+            <div class="card">
+                <h4>AES-128 AXI IP</h4>
+                <p>Our custom hardware accelerator. It performs 10 rounds of AES encryption in just 12 clock cycles per block.</p>
+            </div>
+            <div class="card">
+                <h4>AXI BRAM Controller</h4>
+                <p>Provides 8KB of high-speed on-chip memory to store the image pixels and the encrypted results before transmission.</p>
+            </div>
+            <div class="card">
+                <h4>UART Lite IP</h4>
+                <p>The bridge between the FPGA and the host PC, transmitting data at 115,200 baud.</p>
+            </div>
+        </div>
+
+        <div class="diagram">
+            [ PC (Python) ] <--- UART ---> [ UART Lite IP ] <--- AXI Bus ---> [ MicroBlaze ] <---> [ AES IP Core ]
+        </div>
+    </section>
+
+    <section>
+        <h2>3. Technical Specifications</h2>
+        <h3>A. Hardware Details</h3>
+        <table>
+            <tr>
+                <th>Attribute</th>
+                <th>Specification</th>
+            </tr>
+            <tr>
+                <td>FPGA Device</td>
+                <td>Xilinx Artix-7 (XC7A100T-1CSG324C)</td>
+            </tr>
+            <tr>
+                <td>System Clock</td>
+                <td>25.0 MHz (Optimized for Timing Closure)</td>
+            </tr>
+            <tr>
+                <td>Encryption Latency</td>
+                <td>~480 nanoseconds per 128-bit block</td>
+            </tr>
+            <tr>
+                <td>Resource Usage</td>
+                <td>~2,800 LUTs, ~1,900 Flip-Flops, 2 BRAM Blocks</td>
+            </tr>
+        </table>
+
+        <h3>B. Software Flow (The C Application)</h3>
+        <p>The software running on MicroBlaze performs the following loop:</p>
+        <ul>
+            <li><strong>Initialization:</strong> Sets up UART and waits for a physical button press (Button C).</li>
+            <li><strong>Data Fetch:</strong> Reads a 128-bit block from the Input BRAM.</li>
+            <li><strong>Hardware Call:</strong> Writes the 128-bit block to the AES IP registers via <code>Xil_Out32</code>.</li>
+            <li><strong>Wait/Status:</strong> Polls the AES Status register until the "Done" bit is set.</li>
+            <li><strong>Result Storage:</strong> Reads the 128-bit ciphertext and stores it in the Output BRAM.</li>
+            <li><strong>Transmission:</strong> Sends the encrypted bytes over UART to the Python script.</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>4. The Custom AES-128 IP Core</h2>
+        <p>The AES core was designed in Verilog and wrapped with an AXI4-Lite interface. Key design features include:</p>
+        <ul>
+            <li><strong>Combinational Key Expansion:</strong> The round keys are expanded in a single clock cycle to minimize latency.</li>
+            <li><strong>Round Logic:</strong> Each round performs SubBytes, ShiftRows, MixColumns (for rounds 1-9), and AddRoundKey.</li>
+            <li><strong>Address Map:</strong>
+                <ul>
+                    <li><code>0x00</code>: Control Register (Bit 0 starts encryption)</li>
+                    <li><code>0x04</code>: Status Register (Bit 0 indicates completion)</li>
+                    <li><code>0x08-0x14</code>: 128-bit Key Registers</li>
+                    <li><code>0x18-0x24</code>: 128-bit Data Input Registers</li>
+                    <li><code>0x28-0x34</code>: 128-bit Data Output Registers</li>
+                </ul>
+            </li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>5. Design Challenges & Optimization</h2>
+        <div class="badge">Critical Optimization</div>
+        <p>
+            During implementation, we encountered a <strong>Timing Violation</strong> where the logic paths in the AES key expansion were too long for a 100 MHz clock. 
+            <strong>Solution:</strong> We utilized a <code>clk_wiz</code> (Clock Wizard) to reduce the system clock to 25 MHz. This provided a 40ns period, giving the signals enough time to propagate through the complex AES logic, ensuring 100% stability on hardware.
+        </p>
+    </section>
+
+    <section>
+        <h2>6. Conclusion</h2>
+        <p>
+            This project successfully demonstrates the power of <strong>FPGA Hardware Acceleration</strong>. By offloading the AES encryption to a custom IP core, we achieved high-throughput encryption while keeping the system flexible through software control. The end-to-end integration from Python scripts to FPGA logic provides a robust foundation for secure IoT and edge computing applications.
+        </p>
+    </section>
+
+    <footer>
+        <p>Designed and Implemented for Digilent Nexys 4 DDR</p>
+        <p>&copy; 2026 FPGA Security Solutions Report</p>
+    </footer>
+</div>
+
+</body>
+</html>

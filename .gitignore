@@ -1,0 +1,53 @@
+# ============================================================
+# .gitignore — AES-128 Image Encryption IP Core Project
+# ============================================================
+
+# === Vivado Generated Files ===
+hw/vivado/vivado_proj/
+*.jou
+*.log
+*.str
+*.runs/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.sim/
+*.gen/
+*.xpr
+*.bit
+*.ltx
+*.dcp
+
+# === Vitis / SDK ===
+.Xil/
+.metadata/
+Debug/
+Release/
+*.elf
+*.o
+*.d
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# === Capture Artifacts (regeneratable) ===
+capture_output/*.raw
+capture_output/*.png
+capture_output/*.txt
+comparison.png
+
+# === Temporary / OS Files ===
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Packaged Archives ===
+*.zip

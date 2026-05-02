@@ -1,0 +1,272 @@
+% ============================================================
+% PART 5: Section 10 - Appendix (code listings)
+% ============================================================
+
+\newpage
+\appendix
+\section*{Appendix}
+\addcontentsline{toc}{section}{Appendix}
+
+% ---- Appendix A ----
+\renewcommand{\thesection}{A}
+\section{AES-128 Core Verilog Source (\texttt{aes128\_core.v})}
+\label{app:aes_core}
+
+\begin{lstlisting}[style=verilogstyle, caption={aes128\_core.v -- AES-128 ECB Encryption Engine (FIPS-197), 12-cycle latency}]
+module aes128_core (
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        start,
+    input  wire [127:0] key,
+    input  wire [127:0] data_in,
+    output reg  [127:0] data_out,
+    output reg         done
+);
+
+// S-box (forward, 256 entries -- combinational function)
+function [7:0] sbox_f;
+    input [7:0] x;
+    case (x)
+        8'h00:sbox_f=8'h63; 8'h01:sbox_f=8'h7c; // ... (full 256 entries)
+        default: sbox_f = 8'h00;
+    endcase
+endfunction
+
+// xtime: multiply by 2 in GF(2^8)
+function [7:0] xtime_f;
+    input [7:0] b;
+    xtime_f = b[7] ? ((b << 1) ^ 8'h1b) : (b << 1);
+endfunction
+
+// State machine
+localparam ST_IDLE=2'd0, ST_RUNNING=2'd1, ST_DONE=2'd2;
+reg [1:0]   state;
+reg [3:0]   round;
+reg [127:0] blk;
+reg [1407:0] rk_reg;
+
+always @(posedge clk) begin
+    if (!rst_n) begin
+        state<=ST_IDLE; done<=0; data_out<=0; blk<=0; round<=0; rk_reg<=0;
+    end else begin
+        done <= 1'b0;
+        case (state)
+        ST_IDLE: begin
+            if (start) begin
+                key_expand(key, rk_reg);
+                blk   <= data_in ^ key;
+                round <= 4'd1;
+                state <= ST_RUNNING;
+            end
+        end
+        ST_RUNNING: begin
+            if (round < 4'd10) begin
+                blk   <= mix_columns_f(shift_rows_f(sub_bytes_f(blk)))
+                         ^ get_rk(rk_reg, round);
+                round <= round + 4'd1;
+            end else begin
+                blk   <= shift_rows_f(sub_bytes_f(blk)) ^ get_rk(rk_reg, 4'd10);
+                state <= ST_DONE;
+            end
+        end
+        ST_DONE: begin
+            data_out <= blk;
+            done     <= 1'b1;
+            state    <= ST_IDLE;
+        end
+        endcase
+    end
+end
+endmodule
+\end{lstlisting}
+
+% ---- Appendix B ----
+\renewcommand{\thesection}{B}
+\section{AXI4-Lite Wrapper Verilog Source (\texttt{aes128\_axilite\_wrapper.v})}
+\label{app:axi_wrapper}
+
+\begin{lstlisting}[style=verilogstyle, caption={aes128\_axilite\_wrapper.v -- AXI4-Lite Slave Wrapper with 14 Registers}]
+module aes128_axilite_wrapper #(
+    parameter C_S_AXI_DATA_WIDTH = 32,
+    parameter C_S_AXI_ADDR_WIDTH = 6
+)(
+    input  wire S_AXI_ACLK, S_AXI_ARESETN,
+    input  wire [5:0]  S_AXI_AWADDR, S_AXI_ARADDR,
+    input  wire [31:0] S_AXI_WDATA,
+    input  wire        S_AXI_AWVALID, S_AXI_WVALID,
+    input  wire        S_AXI_BREADY, S_AXI_ARVALID, S_AXI_RREADY,
+    output wire        S_AXI_AWREADY, S_AXI_WREADY,
+    output wire        S_AXI_BVALID, S_AXI_ARREADY, S_AXI_RVALID,
+    output wire [31:0] S_AXI_RDATA,
+    output wire [1:0]  S_AXI_BRESP, S_AXI_RRESP,
+    input  wire [2:0]  S_AXI_AWPROT, S_AXI_ARPROT,
+    input  wire [3:0]  S_AXI_WSTRB
+);
+// ... AXI write/read channel FSM + 14-register file + AES core instantiation
+// CTRL[0]=START, STATUS[0]=DONE (latched)
+// KEY_W0-W3 (0x08-0x14), DIN_W0-W3 (0x18-0x24), DOUT_W0-W3 (0x28-0x34)
+endmodule
+\end{lstlisting}
+
+% ---- Appendix C ----
+\renewcommand{\thesection}{C}
+\section{MicroBlaze Firmware (\texttt{main.c})}
+\label{app:main_c}
+
+\begin{lstlisting}[style=cstyle, caption={main.c -- AES-128 CTR Image Encryption Firmware (JTAG-Only)}]
+#include <stdint.h>
+#include <string.h>
+#include "xil_io.h"
+#include "xparameters.h"
+#include "aes_ip_driver.h"
+
+#define GPIO_BASE      XPAR_AXI_GPIO_0_BASEADDR
+#define GPIO_DATA_OUT  (GPIO_BASE + 0x00)
+#define GPIO_DATA_IN   (GPIO_BASE + 0x08)
+#define LED0_BIT       (1 << 0)
+#define LED16_R_BIT    (1 << 1)
+#define LED16_G_BIT    (1 << 2)
+#define BTNC_BIT       (1 << 0)
+
+int main(void) {
+    static const uint8_t key[16] = {
+        0x00,0x01,0x02,0x03, 0x04,0x05,0x06,0x07,
+        0x08,0x09,0x0A,0x0B, 0x0C,0x0D,0x0E,0x0F
+    };
+    uint8_t counter[16] = {
+        0xF0,0xE0,0xD0,0xC0, 0xB0,0xA0,0x90,0x80,
+        0x70,0x60,0x50,0x40, 0x30,0x20,0x01,0x00
+    };
+    uint8_t plain[16], cipher[16], ks[16];
+
+    Xil_Out32(GPIO_BASE + 0x04, 0x00); // tri = output
+
+    while (1) {
+        Xil_Out32(GPIO_DATA_OUT, LED0_BIT); // idle
+
+        while (!(Xil_In32(GPIO_DATA_IN) & BTNC_BIT)) {}
+        for (volatile int d = 0; d < 500000; d++) {} // debounce
+        while (Xil_In32(GPIO_DATA_IN) & BTNC_BIT) {}
+
+        Xil_Out32(GPIO_DATA_OUT, LED16_R_BIT); // encrypting
+        counter[14] = 0x01; counter[15] = 0x00;
+        AES_WriteKey(key);
+
+        for (uint32_t blk = 0; blk < 256; blk++) {
+            uint32_t byte_off = blk * 16;
+            for (int i = 0; i < 4; i++) {
+                uint32_t w = Xil_In32(
+                    XPAR_AXI_BRAM_CTRL_0_BASEADDR + byte_off + i*4);
+                plain[i*4+0]=(w>>24)&0xFF; plain[i*4+1]=(w>>16)&0xFF;
+                plain[i*4+2]=(w>> 8)&0xFF; plain[i*4+3]= w     &0xFF;
+            }
+            AES_WriteDataIn(counter);
+            AES_Start(); AES_WaitDone(); AES_ReadDataOut(ks);
+            for (int i = 0; i < 16; i++) cipher[i] = plain[i] ^ ks[i];
+            for (int i = 0; i < 4; i++) {
+                uint32_t w = ((uint32_t)cipher[i*4+0]<<24)|
+                             ((uint32_t)cipher[i*4+1]<<16)|
+                             ((uint32_t)cipher[i*4+2]<< 8)|
+                             ((uint32_t)cipher[i*4+3]);
+                Xil_Out32(XPAR_AXI_BRAM_CTRL_1_BASEADDR + byte_off + i*4, w);
+            }
+            for (int j=15; j>=0; j--) if (++counter[j]!=0x00) break;
+        }
+        Xil_Out32(GPIO_DATA_OUT, LED16_G_BIT); // done
+        while (Xil_In32(GPIO_DATA_IN) & BTNC_BIT) {}
+        while (!(Xil_In32(GPIO_DATA_IN) & BTNC_BIT)) {}
+    }
+    return 0;
+}
+\end{lstlisting}
+
+% ---- Appendix D ----
+\renewcommand{\thesection}{D}
+\section{AES IP Software Driver (\texttt{aes\_ip\_driver.h})}
+\label{app:driver}
+
+\begin{lstlisting}[style=cstyle, caption={aes\_ip\_driver.h -- AXI-Lite C Driver API}]
+#ifndef AES_IP_DRIVER_H
+#define AES_IP_DRIVER_H
+#include <stdint.h>
+#include "xil_io.h"
+#include "xparameters.h"
+
+#define AES_IP_BASEADDR   XPAR_AES128_AXILITE_0_BASEADDR
+#define AES_REG_CTRL      0x00U
+#define AES_REG_STATUS    0x04U
+#define AES_REG_KEY_W0    0x08U  /* key[127:96] */
+#define AES_REG_DIN_W0    0x18U  /* data_in[127:96] */
+#define AES_REG_DOUT_W0   0x28U  /* data_out[127:96] */
+#define AES_CTRL_START    (1U << 0)
+#define AES_STATUS_DONE   (1U << 0)
+#define AES_WRITE(off,val) Xil_Out32(AES_IP_BASEADDR+(off),(val))
+#define AES_READ(off)      Xil_In32(AES_IP_BASEADDR+(off))
+
+static inline void AES_WriteKey(const uint8_t key[16]) { /* ... */ }
+static inline void AES_WriteDataIn(const uint8_t blk[16]) { /* ... */ }
+static inline void AES_Start(void) { AES_WRITE(AES_REG_CTRL, AES_CTRL_START); }
+static inline void AES_WaitDone(void) {
+    while (!(AES_READ(AES_REG_STATUS) & AES_STATUS_DONE)) {}
+}
+static inline void AES_ReadDataOut(uint8_t out[16]) { /* ... */ }
+#endif
+\end{lstlisting}
+
+% ---- Appendix E ----
+\renewcommand{\thesection}{E}
+\section{XDC Constraints File (\texttt{nexys4ddr\_image\_crypto.xdc})}
+\label{app:xdc}
+
+\begin{lstlisting}[style=tclstyle, caption={nexys4ddr\_image\_crypto.xdc -- Physical Pin Constraints}]
+# Target: xc7a100tcsg324-1  |  Vivado 2024.2
+set_property CFGBVS VCCO [current_design]
+set_property CONFIG_VOLTAGE 3.3 [current_design]
+
+# UART (FT2232HQ Channel B)
+set_property PACKAGE_PIN C4  [get_ports UART_txd]
+set_property IOSTANDARD LVCMOS33 [get_ports UART_txd]
+set_property PACKAGE_PIN D4  [get_ports UART_rxd]
+set_property IOSTANDARD LVCMOS33 [get_ports UART_rxd]
+
+# GPIO LEDs
+set_property PACKAGE_PIN H17 [get_ports {GPIO_LEDS[0]}]  ;# LED0
+set_property PACKAGE_PIN N15 [get_ports {GPIO_LEDS[1]}]  ;# LED16_R
+set_property PACKAGE_PIN R11 [get_ports {GPIO_LEDS[2]}]  ;# LED16_G
+set_property IOSTANDARD LVCMOS33 [get_ports {GPIO_LEDS[*]}]
+
+# GPIO Buttons
+set_property PACKAGE_PIN N17 [get_ports {GPIO_BTNS[0]}]  ;# BTNC
+set_property PACKAGE_PIN P18 [get_ports {GPIO_BTNS[1]}]  ;# BTND
+set_property IOSTANDARD LVCMOS33 [get_ports {GPIO_BTNS[*]}]
+\end{lstlisting}
+
+% ---- Appendix F ----
+\renewcommand{\thesection}{F}
+\section{Python Dashboard Automation Script (\texttt{auto\_dashboard.py})}
+\label{app:python}
+
+\begin{lstlisting}[language=Python, style=cstyle, caption={auto\_dashboard.py -- JTAG Memory Extraction and Dashboard Generation}]
+import subprocess, base64, time
+
+XSCT_PATH = r"C:\Xilinx\Vitis\2024.2\bin\xsct.bat"
+DUMP_SCRIPT = "scripts/dump_both.tcl"
+LOAD_SCRIPT = "scripts/load_explicit.tcl"
+HTML_PATH   = r"C:\Users\Tanmay\OneDrive\Desktop\aes_hardware_dashboard.html"
+
+def run_sync():
+    subprocess.run([XSCT_PATH, DUMP_SCRIPT], ...)
+    with open("input_image.raw","rb") as f: in_b64 = base64.b64encode(f.read())
+    with open("output_image.raw","rb") as f: out_b64 = base64.b64encode(f.read())
+    html = HTML_TEMPLATE.replace("{IN_B64}", in_b64.decode())
+    html = html.replace("{OUT_B64}", out_b64.decode())
+    with open(HTML_PATH, "w", encoding="utf-8") as f: f.write(html)
+    print(f"Dashboard updated at {time.strftime('%I:%M:%S %p')}")
+
+while True:
+    print("STEP 1: Uploading image to FPGA...")
+    subprocess.run([XSCT_PATH, LOAD_SCRIPT], ...)  # 1024 mwr commands
+    input("STEP 2: Press BTNC on board, then press ENTER...")
+    print("STEP 3: Syncing dashboard...")
+    run_sync()
+\end{lstlisting}
