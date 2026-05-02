@@ -3,10 +3,10 @@
 # ============================================================
 
 # === Vivado Generated Files ===
-hw/vivado/vivado_proj/
 *.jou
 *.log
 *.str
+hw/vivado/vivado_proj/
 *.runs/
 *.cache/
 *.hw/
@@ -35,19 +35,25 @@ __pycache__/
 venv/
 *.egg-info/
 
-# === Capture Artifacts (regeneratable) ===
-capture_output/*.raw
-capture_output/*.png
-capture_output/*.txt
-comparison.png
+# === Temp raw/binary files in root ===
+/*.raw
+/*.bin
 
-# === Temporary / OS Files ===
+# === Generated HTML reports ===
+/*.html
+docs/
+
+# === Archives ===
+*.zip
+
+# === Capture artifacts ===
+capture_output/
+scripts/capture_output/
+
+# === OS Files ===
 *.tmp
 *.bak
 *.swp
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# === Packaged Archives ===
-*.zip
