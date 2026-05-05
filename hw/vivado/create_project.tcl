@@ -185,7 +185,7 @@ make_bd_pins_external [get_bd_pins axi_gpio_0/gpio2_io_i]
 set_property name GPIO_LEDS [get_bd_ports gpio_io_o_0]
 set_property name GPIO_BTNS [get_bd_ports gpio2_io_i_0]
 
-# ---- 3f. Input Image BRAM (pre-loaded with .coe) ----
+# ---- 3f. Input Image BRAM (16 KB — loaded at runtime via JTAG mwr) ----
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:* axi_bram_ctrl_0
 set_property -dict [list \
     CONFIG.SINGLE_PORT_BRAM {1} \
@@ -196,11 +196,7 @@ apply_bd_automation -rule xilinx.com:bd_rule:bram_cntlr \
     -config {BRAM "New Blk_Mem_Gen"} \
     [get_bd_intf_pins axi_bram_ctrl_0/BRAM_PORTA]
 
-# The automation creates a BRAM named axi_bram_ctrl_0_bram. We add our COE file to it.
-set_property -dict [list \
-    CONFIG.Load_Init_File {true} \
-    CONFIG.Coe_File [file normalize "$proj_root/sample_assets/sample_64x64_gradient.coe"] \
-] [get_bd_cells axi_bram_ctrl_0_bram]
+# No COE initialization — images are uploaded via JTAG at runtime
 
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
     -config { Clk_master {/clk_wiz_0/clk_out1} Clk_slave {/clk_wiz_0/clk_out1} \
@@ -209,7 +205,7 @@ apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
               master_apm {0} } \
     [get_bd_intf_pins axi_bram_ctrl_0/S_AXI]
 
-# ---- 3g. Output Image BRAM ----
+# ---- 3g. Output Image BRAM (16 KB — ciphertext) ----
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:* axi_bram_ctrl_1
 set_property -dict [list \
     CONFIG.SINGLE_PORT_BRAM {1} \
@@ -226,6 +222,24 @@ apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
               Slave {/axi_bram_ctrl_1/S_AXI} intc_ip {Auto} \
               master_apm {0} } \
     [get_bd_intf_pins axi_bram_ctrl_1/S_AXI]
+
+# ---- 3g2. Decrypt Output BRAM (16 KB — recovered plaintext) ----
+create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:* axi_bram_ctrl_2
+set_property -dict [list \
+    CONFIG.SINGLE_PORT_BRAM {1} \
+    CONFIG.ECC_TYPE         {0} \
+] [get_bd_cells axi_bram_ctrl_2]
+
+apply_bd_automation -rule xilinx.com:bd_rule:bram_cntlr \
+    -config {BRAM "New Blk_Mem_Gen"} \
+    [get_bd_intf_pins axi_bram_ctrl_2/BRAM_PORTA]
+
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 \
+    -config { Clk_master {/clk_wiz_0/clk_out1} Clk_slave {/clk_wiz_0/clk_out1} \
+              Clk_xbar {/clk_wiz_0/clk_out1} Master {/microblaze_0 (Periph)} \
+              Slave {/axi_bram_ctrl_2/S_AXI} intc_ip {Auto} \
+              master_apm {0} } \
+    [get_bd_intf_pins axi_bram_ctrl_2/S_AXI]
 
 # ---- 3h. Custom AES-128 AXI-Lite IP ----
 create_bd_cell -type ip -vlnv user.org:user:aes128_axilite:1.0 aes128_axilite_0
@@ -248,10 +262,13 @@ set_property offset 0x44A00000 [get_bd_addr_segs {microblaze_0/Data/SEG_aes128_a
 set_property range  4K         [get_bd_addr_segs {microblaze_0/Data/SEG_aes128_axilite_0_reg0}]
 
 set_property offset 0xC0000000 [get_bd_addr_segs {microblaze_0/Data/SEG_axi_bram_ctrl_0_Mem0}]
-set_property range  8K         [get_bd_addr_segs {microblaze_0/Data/SEG_axi_bram_ctrl_0_Mem0}]
+set_property range  16K        [get_bd_addr_segs {microblaze_0/Data/SEG_axi_bram_ctrl_0_Mem0}]
 
 set_property offset 0xC2000000 [get_bd_addr_segs {microblaze_0/Data/SEG_axi_bram_ctrl_1_Mem0}]
-set_property range  8K         [get_bd_addr_segs {microblaze_0/Data/SEG_axi_bram_ctrl_1_Mem0}]
+set_property range  16K        [get_bd_addr_segs {microblaze_0/Data/SEG_axi_bram_ctrl_1_Mem0}]
+
+set_property offset 0xC4000000 [get_bd_addr_segs {microblaze_0/Data/SEG_axi_bram_ctrl_2_Mem0}]
+set_property range  16K        [get_bd_addr_segs {microblaze_0/Data/SEG_axi_bram_ctrl_2_Mem0}]
 
 # ---------------------------------------------------------------------------
 # STEP 5: Validate, generate outputs, create wrapper

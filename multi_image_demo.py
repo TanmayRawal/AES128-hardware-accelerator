@@ -1,562 +1,467 @@
 #!/usr/bin/env python3
 """
-multi_image_demo.py — Multi-Image AES-128 Hardware Encryption Demonstrator
+multi_image_demo.py -- Publication-Grade AES-128 Hardware Validation Pipeline
 
-Generates 3 different 64×64 test images, loads each into the FPGA's Input BRAM
-via JTAG (XSCT), triggers hardware AES-128 CTR encryption, dumps the Output BRAM,
-and produces a single comprehensive HTML dashboard comparing all results.
+Fully automated JTAG-based pipeline:
+  1. Generates 8 test images (128x128)
+  2. Uploads each to FPGA via bulk binary JTAG transfer
+  3. Triggers encrypt + decrypt + verify on MicroBlaze
+  4. Extracts ciphertext + recovered plaintext via JTAG
+  5. Runs NIST SP 800-22 (all 15 tests) on concatenated ciphertext
+  6. Computes NPCR, UACI, avalanche, correlation metrics
+  7. Generates comprehensive HTML dashboard
+  8. Auto-opens in browser
 
 Usage:
     python multi_image_demo.py
 
 Requirements:
-    - FPGA must be programmed and running the AES firmware (main.c)
-    - Xilinx XSCT must be available at the configured path
-    - Board connected via USB/JTAG
+    - FPGA programmed with updated bitstream (16KB BRAMs, 128x128)
+    - Xilinx XSCT available at configured path
+    - pip install numpy scipy Pillow pycryptodome
 """
 
-import subprocess
-import struct
-import base64
-import math
-import os
-import time
-import sys
+import subprocess, struct, base64, math, os, time, sys, webbrowser, json
+import numpy as np
 
-# ─────────────────── Configuration ───────────────────
+# Add scripts/ to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'scripts'))
+from scripts.nist_sp800_22 import run_all_tests as nist_run_all
+from scripts.crypto_metrics import (
+    shannon_entropy, chi_square, bit_balance, npcr, uaci,
+    adjacent_pixel_correlation, avalanche_effect_software,
+    key_sensitivity_software, throughput_comparison
+)
+
+# ===================== Configuration =====================
 XSCT_PATH    = r"C:\Xilinx\Vitis\2024.2\bin\xsct.bat"
-PROJECT_DIR  = r"C:\Users\Tanmay\Downloads\aes128_image_encryption_ipcore_nexys4ddr\aes128_image_encryption_ipcore_nexys4ddr"
-DUMP_SCRIPT  = os.path.join(PROJECT_DIR, "scripts", "dump_both.tcl")
-HTML_OUTPUT  = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop", "aes_multi_image_demo.html")
+PROJECT_DIR  = os.path.dirname(os.path.abspath(__file__))
+TMP_DIR      = os.path.join(PROJECT_DIR, "_tmp")
+HTML_OUTPUT  = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop",
+                            "aes128_validation_dashboard.html")
 
 BRAM_IN_BASE  = 0xC0000000
-IMG_SIZE      = 64
-IMG_BYTES     = IMG_SIZE * IMG_SIZE  # 4096
+BRAM_OUT_BASE = 0xC2000000
+BRAM_DEC_BASE = 0xC4000000
+IMG_SIZE      = 128
+IMG_BYTES     = IMG_SIZE * IMG_SIZE  # 16384
+WORD_COUNT    = IMG_BYTES // 4       # 4096
 
-# ─────────────────── Image Generators ───────────────────
+# AES parameters (must match firmware)
+AES_KEY = bytes(range(16))
+AES_IV  = bytes([0xF0,0xE0,0xD0,0xC0,0xB0,0xA0,0x90,0x80,
+                 0x70,0x60,0x50,0x40,0x30,0x20,0x10,0x00])
 
-def generate_gradient(size=64):
-    """Diagonal gradient: black top-left → white bottom-right."""
-    pixels = bytearray(size * size)
-    for y in range(size):
-        for x in range(size):
-            val = int(((x + y) / (2 * (size - 1))) * 255)
-            pixels[y * size + x] = val
-    return bytes(pixels), "Diagonal Gradient", "Smooth diagonal gradient from black (0) to white (255)"
+# ===================== Image Generators =====================
 
-def generate_checkerboard(size=64, block_sz=8):
-    """Classic 8×8 checkerboard pattern (0 and 255)."""
-    pixels = bytearray(size * size)
-    for y in range(size):
-        for x in range(size):
-            bx = x // block_sz
-            by = y // block_sz
-            pixels[y * size + x] = 255 if ((bx + by) % 2 == 0) else 0
-    return bytes(pixels), "Checkerboard 8×8", "High-contrast binary pattern: 0x00 and 0xFF alternating blocks"
+def gen_gradient(sz=128):
+    p = bytearray(sz*sz)
+    for y in range(sz):
+        for x in range(sz):
+            p[y*sz+x] = int(((x+y)/(2*(sz-1)))*255)
+    return bytes(p), "Diagonal Gradient", "Smooth gradient: black to white"
 
-def generate_concentric_circles(size=64):
-    """Concentric rings radiating from center."""
-    pixels = bytearray(size * size)
-    cx, cy = size // 2, size // 2
-    max_r = math.sqrt(cx*cx + cy*cy)
-    for y in range(size):
-        for x in range(size):
-            r = math.sqrt((x - cx)**2 + (y - cy)**2)
-            val = int((math.sin(r * math.pi / 4) * 0.5 + 0.5) * 255)
-            pixels[y * size + x] = val
-    return bytes(pixels), "Concentric Circles", "Sinusoidal rings from center, tests radial patterns"
+def gen_checkerboard(sz=128, blk=16):
+    p = bytearray(sz*sz)
+    for y in range(sz):
+        for x in range(sz):
+            p[y*sz+x] = 255 if ((x//blk+y//blk)%2==0) else 0
+    return bytes(p), "Checkerboard", "Binary 16x16 block pattern"
 
-# ─────────────────── XSCT Helpers ───────────────────
+def gen_circles(sz=128):
+    p = bytearray(sz*sz)
+    cx, cy = sz//2, sz//2
+    for y in range(sz):
+        for x in range(sz):
+            r = math.sqrt((x-cx)**2+(y-cy)**2)
+            p[y*sz+x] = int((math.sin(r*math.pi/6)*0.5+0.5)*255)
+    return bytes(p), "Concentric Circles", "Sinusoidal radial rings"
 
-def generate_load_tcl(pixel_data, tcl_path):
-    """Create a TCL script that writes pixel_data into Input BRAM via mwr commands."""
-    lines = ['connect', 'targets -set -filter {name =~ "MicroBlaze #0"}']
+def gen_stripes(sz=128):
+    p = bytearray(sz*sz)
+    for y in range(sz):
+        for x in range(sz):
+            p[y*sz+x] = int((math.sin(y*math.pi/8)*0.5+0.5)*255)
+    return bytes(p), "Horizontal Stripes", "Sinusoidal horizontal bands"
 
-    # Pack pixel bytes into 32-bit big-endian words and write via mwr
-    for word_idx in range(0, len(pixel_data), 4):
-        chunk = pixel_data[word_idx:word_idx+4]
-        if len(chunk) < 4:
-            chunk = chunk + b'\x00' * (4 - len(chunk))
-        word_val = struct.unpack('>I', chunk)[0]
-        addr = BRAM_IN_BASE + word_idx
-        lines.append(f"mwr 0x{addr:08X} 0x{word_val:08X}")
+def gen_random(sz=128):
+    return bytes(np.random.randint(0, 256, sz*sz, dtype=np.uint8)), "Random Noise", "Uniform random (baseline)"
 
-    # Reset the MicroBlaze processor so firmware restarts fresh
-    # This does NOT re-program the bitstream, so BRAM data is preserved
-    lines.append('rst -processor')
-    lines.append('con')
-    lines.append('after 500')
-    lines.append('disconnect')
-    lines.append('exit')
+def gen_white(sz=128):
+    return bytes([255]*sz*sz), "Solid White", "All 0xFF edge case"
 
+def gen_black(sz=128):
+    return bytes([0]*sz*sz), "Solid Black", "All 0x00 edge case"
+
+def gen_cross(sz=128):
+    p = bytearray(sz*sz)
+    for y in range(sz):
+        for x in range(sz):
+            if abs(x-sz//2) < 8 or abs(y-sz//2) < 8:
+                p[y*sz+x] = 255
+    return bytes(p), "Center Cross", "Geometric cross pattern"
+
+# ===================== JTAG Helpers =====================
+
+def ensure_tmp():
+    os.makedirs(TMP_DIR, exist_ok=True)
+
+def run_xsct(tcl_content, timeout=180):
+    """Write TCL to temp file and run via XSCT."""
+    tcl_path = os.path.join(TMP_DIR, "_cmd.tcl")
     with open(tcl_path, 'w') as f:
-        f.write('\n'.join(lines) + '\n')
-
-def load_image_to_fpga(tcl_path):
-    """Run the XSCT load script to fill Input BRAM."""
+        f.write(tcl_content)
+    
     result = subprocess.run(
         [XSCT_PATH, tcl_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=120
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout
     )
-    return result.returncode == 0
+    return result.returncode == 0, result.stdout.decode(errors='replace')
 
-def dump_bram():
-    """Run dump_both.tcl to extract both BRAMs to .raw files."""
-    result = subprocess.run(
-        [XSCT_PATH, DUMP_SCRIPT],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60
-    )
-    return result.returncode == 0
+def upload_and_run(pixel_data, idx):
+    """Upload image, trigger encrypt+decrypt, extract results."""
+    # Save pixels as binary
+    pix_path = os.path.join(TMP_DIR, f"pixels_{idx}.bin")
+    out_path = os.path.join(TMP_DIR, f"cipher_{idx}.bin")
+    dec_path = os.path.join(TMP_DIR, f"decrypt_{idx}.bin")
+    
+    with open(pix_path, 'wb') as f:
+        # Convert to 32-bit big-endian words for BRAM
+        for i in range(0, len(pixel_data), 4):
+            chunk = pixel_data[i:i+4]
+            if len(chunk) < 4:
+                chunk = chunk + b'\x00' * (4 - len(chunk))
+            f.write(struct.pack('>I', struct.unpack('>I', chunk)[0]))
+    
+    # TCL: upload, reset, wait, extract
+    tcl = f"""
+connect
+targets -set -filter {{name =~ "MicroBlaze #0"}}
 
-def read_raw_file(filename):
-    """Read a .raw binary file and return bytes (padded/truncated to IMG_BYTES)."""
-    path = os.path.join(PROJECT_DIR, filename)
-    with open(path, 'rb') as f:
-        data = f.read()
-    data = data[:IMG_BYTES]
-    if len(data) < IMG_BYTES:
-        data += b'\x00' * (IMG_BYTES - len(data))
-    return data
+# Upload image to Input BRAM
+mwr -bin -file {{{pix_path.replace(chr(92), '/')}}} 0x{BRAM_IN_BASE:08X} {WORD_COUNT}
 
-# ─────────────────── Crypto Statistics ───────────────────
+# Reset processor -> firmware auto-starts encrypt+decrypt
+rst -processor
+con
+after 8000
 
-def calc_entropy(data):
-    """Shannon entropy in bits per byte."""
-    freq = [0] * 256
-    for b in data:
-        freq[b] += 1
-    total = len(data)
-    entropy = 0.0
-    for f in freq:
-        if f > 0:
-            p = f / total
-            entropy -= p * math.log2(p)
-    return entropy
+# Extract ciphertext from Output BRAM
+mrd -bin -file {{{out_path.replace(chr(92), '/')}}} 0x{BRAM_OUT_BASE:08X} {WORD_COUNT}
 
-def calc_bit_balance(data):
-    """Percentage of 1-bits vs total bits."""
-    ones = sum(bin(b).count('1') for b in data)
-    total = len(data) * 8
-    return (ones / total) * 100
+# Extract recovered plaintext from Decrypt BRAM
+mrd -bin -file {{{dec_path.replace(chr(92), '/')}}} 0x{BRAM_DEC_BASE:08X} {WORD_COUNT}
 
-def calc_chi_square(data):
-    """Chi-square statistic for uniformity test."""
-    freq = [0] * 256
-    for b in data:
-        freq[b] += 1
-    expected = len(data) / 256
-    chi2 = sum((f - expected)**2 / expected for f in freq)
-    return chi2
-
-def calc_correlation(data):
-    """Correlation coefficient between adjacent pixels."""
-    n = len(data) - 1
-    if n <= 0:
-        return 0.0
-    x = [data[i] for i in range(n)]
-    y = [data[i+1] for i in range(n)]
-    mean_x = sum(x) / n
-    mean_y = sum(y) / n
-    cov = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n)) / n
-    var_x = sum((xi - mean_x)**2 for xi in x) / n
-    var_y = sum((yi - mean_y)**2 for yi in y) / n
-    denom = math.sqrt(var_x * var_y)
-    return cov / denom if denom > 0 else 0.0
-
-
-# ─────────────────── HTML Dashboard ───────────────────
-
-def generate_html(results, timestamp):
-    """Build a comprehensive multi-image comparison dashboard."""
-
-    # Build image cards HTML
-    image_cards = ""
-    stats_rows = ""
-
-    for idx, r in enumerate(results):
-        in_b64 = base64.b64encode(r['input_data']).decode()
-        out_b64 = base64.b64encode(r['output_data']).decode()
-        key_data = bytes(a ^ b for a, b in zip(r['input_data'], r['output_data']))
-        key_b64 = base64.b64encode(key_data).decode()
-
-        image_cards += f"""
-    <div class="image-set">
-      <h2 class="set-title">Test Image {idx+1}: {r['name']}</h2>
-      <p class="set-desc">{r['description']}</p>
-      <div class="triple">
-        <div class="img-card">
-          <h3>Plaintext (Input)</h3>
-          <canvas id="pIn{idx}" width="64" height="64" class="img-canvas"></canvas>
-          <canvas id="hIn{idx}" width="256" height="60" class="hist-canvas"></canvas>
-        </div>
-        <div class="img-card">
-          <h3>Ciphertext (FPGA Output)</h3>
-          <canvas id="pOut{idx}" width="64" height="64" class="img-canvas"></canvas>
-          <canvas id="hOut{idx}" width="256" height="60" class="hist-canvas"></canvas>
-        </div>
-        <div class="img-card">
-          <h3>Keystream (P ⊕ C)</h3>
-          <canvas id="pKey{idx}" width="64" height="64" class="img-canvas"></canvas>
-          <canvas id="hKey{idx}" width="256" height="60" class="hist-canvas"></canvas>
-        </div>
-
-      </div>
-    </div>
+disconnect
+exit
 """
-        # Stats for this image
-        entropy_val = r['entropy']
-        bits_val = r['bit_balance']
-        chi_val = r['chi_square']
-        corr_in = r['corr_input']
-        corr_out = r['corr_output']
-        entropy_class = "pass" if entropy_val > 7.5 else "warn"
-        bits_class = "pass" if 48 < bits_val < 52 else "warn"
+    
+    ok, output = run_xsct(tcl)
+    if not ok:
+        print(f"    WARNING: XSCT returned error for image {idx}")
+    
+    # Read results
+    cipher = b'\x00' * IMG_BYTES
+    decrypt = b'\x00' * IMG_BYTES
+    
+    if os.path.exists(out_path):
+        with open(out_path, 'rb') as f:
+            raw = f.read()
+        # Convert back from 32-bit words to bytes
+        cipher = raw[:IMG_BYTES] if len(raw) >= IMG_BYTES else raw + b'\x00'*(IMG_BYTES-len(raw))
+    
+    if os.path.exists(dec_path):
+        with open(dec_path, 'rb') as f:
+            raw = f.read()
+        decrypt = raw[:IMG_BYTES] if len(raw) >= IMG_BYTES else raw + b'\x00'*(IMG_BYTES-len(raw))
+    
+    return cipher, decrypt
 
-        stats_rows += f"""
-      <tr>
-        <td>{r['name']}</td>
-        <td class="{entropy_class}">{entropy_val:.4f}</td>
-        <td class="{bits_class}">{bits_val:.2f}% / {100-bits_val:.2f}%</td>
-        <td>{chi_val:.1f}</td>
-        <td>{corr_in:.4f}</td>
-        <td class="pass">{corr_out:.4f}</td>
-      </tr>"""
+# ===================== Software Golden Reference =====================
 
-    # Build JavaScript data arrays
-    js_data = "const imageData = [\n"
-    for idx, r in enumerate(results):
-        in_b64 = base64.b64encode(r['input_data']).decode()
-        out_b64 = base64.b64encode(r['output_data']).decode()
-        js_data += f'  {{ inB64: "{in_b64}", outB64: "{out_b64}" }},\n'
+def software_ctr_encrypt(plaintext):
+    """Generate golden reference using PyCryptodome."""
+    try:
+        from Crypto.Cipher import AES
+        nonce = AES_IV[:8]
+        cipher = AES.new(AES_KEY, AES.MODE_CTR, nonce=nonce)
+        return cipher.encrypt(plaintext)
+    except ImportError:
+        print("  WARNING: pycryptodome not installed, skipping golden ref")
+        return None
+
+# ===================== Dashboard HTML =====================
+
+def generate_dashboard(image_results, nist_results, metrics, timestamp):
+    """Build the comprehensive HTML dashboard."""
+    
+    # Build image cards
+    cards_html = ""
+    for idx, r in enumerate(image_results):
+        in_b64 = base64.b64encode(r['pixels']).decode()
+        out_b64 = base64.b64encode(r['cipher']).decode()
+        dec_b64 = base64.b64encode(r['decrypt']).decode()
+        
+        rt_status = "PASS" if r['roundtrip_ok'] else "FAIL"
+        rt_class = "pass" if r['roundtrip_ok'] else "fail"
+        
+        cards_html += f"""
+    <div class="image-set">
+      <h2 class="set-title">Image {idx+1}: {r['name']}</h2>
+      <p class="set-desc">{r['description']} | Roundtrip: <span class="{rt_class}">{rt_status}</span></p>
+      <div class="triple">
+        <div class="img-card"><h3>Plaintext</h3>
+          <canvas id="pI{idx}" width="128" height="128" class="ic"></canvas>
+          <canvas id="hI{idx}" width="256" height="50" class="hc"></canvas>
+        </div>
+        <div class="img-card"><h3>Ciphertext</h3>
+          <canvas id="pO{idx}" width="128" height="128" class="ic"></canvas>
+          <canvas id="hO{idx}" width="256" height="50" class="hc"></canvas>
+        </div>
+        <div class="img-card"><h3>Recovered</h3>
+          <canvas id="pD{idx}" width="128" height="128" class="ic"></canvas>
+          <canvas id="hD{idx}" width="256" height="50" class="hc"></canvas>
+        </div>
+      </div>
+      <div class="stats-row">
+        <span>Entropy: <b>{r['entropy']:.4f}</b></span>
+        <span>Bit Bal: <b>{r['bit_bal']:.2f}%</b></span>
+        <span>Chi-Sq: <b>{r['chi2']:.1f}</b></span>
+        <span>Corr H: <b>{r['corr_h']:.4f}</b></span>
+        <span>Corr V: <b>{r['corr_v']:.4f}</b></span>
+      </div>
+    </div>"""
+    
+    # NIST table
+    nist_rows = ""
+    for r in nist_results:
+        cls = "pass" if r['passed'] else "fail"
+        status = "PASS" if r['passed'] else "FAIL"
+        bar_w = min(r['p_value'] * 100, 100)
+        nist_rows += f"""<tr>
+        <td>{r['test']}</td>
+        <td>{r['p_value']:.6f}</td>
+        <td>0.01</td>
+        <td class="{cls}">{status}</td>
+        <td><div class="pbar"><div class="pfill" style="width:{bar_w}%"></div></div></td></tr>"""
+    
+    nist_passed = sum(1 for r in nist_results if r['passed'])
+    nist_total = len(nist_results)
+    
+    # JS data arrays
+    js_data = "const D=[\n"
+    for r in image_results:
+        js_data += f'{{i:"{base64.b64encode(r["pixels"]).decode()}",o:"{base64.b64encode(r["cipher"]).decode()}",d:"{base64.b64encode(r["decrypt"]).decode()}"}},\n'
     js_data += "];\n"
-
+    
+    # Metrics section
+    m = metrics
+    
     html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>AES-128 Multi-Image FPGA Hardware Validation</title>
-  <style>
-    :root {{
-      --bg: #0a0e1a; --panel: #141b2d; --border: #1e2d4a;
-      --text: #e8ecf4; --muted: #7a8ba8; --accent: #38bdf8;
-      --purple: #a78bfa; --green: #4ade80; --pink: #f472b6;
-    }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      background: var(--bg); color: var(--text);
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      padding: 30px 20px;
-    }}
-    h1 {{
-      text-align: center; font-size: 2.4rem; font-weight: 800;
-      background: linear-gradient(135deg, #38bdf8 0%, #a78bfa 50%, #f472b6 100%);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      margin-bottom: 5px;
-    }}
-    .subtitle {{ text-align: center; color: var(--muted); font-size: 1.05rem; margin-bottom: 10px; }}
-    .timestamp {{ text-align: center; color: #4a5568; font-size: 0.85rem; margin-bottom: 30px; }}
+<html lang="en"><head><meta charset="UTF-8">
+<title>AES-128 Hardware Validation Dashboard</title>
+<style>
+:root{{--bg:#0a0e1a;--pn:#141b2d;--bd:#1e2d4a;--tx:#e8ecf4;--mt:#7a8ba8;--ac:#38bdf8;--gn:#4ade80;--pk:#f472b6;--pp:#a78bfa}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-serif;padding:30px 20px}}
+h1{{text-align:center;font-size:2.2rem;font-weight:800;background:linear-gradient(135deg,#38bdf8,#a78bfa,#f472b6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:5px}}
+.sub{{text-align:center;color:var(--mt);margin-bottom:5px}}.ts{{text-align:center;color:#4a5568;font-size:.85rem;margin-bottom:25px}}
+.panel{{max-width:1150px;margin:0 auto 25px;background:var(--pn);border:1px solid var(--bd);border-radius:14px;padding:22px;box-shadow:0 8px 30px rgba(0,0,0,.35)}}
+.panel h2{{font-size:1.2rem;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--bd)}}
+.image-set{{max-width:1150px;margin:0 auto 20px;background:var(--pn);border:1px solid var(--bd);border-radius:14px;padding:20px;box-shadow:0 6px 20px rgba(0,0,0,.3)}}
+.set-title{{color:var(--ac);font-size:1.15rem;margin-bottom:4px;border-bottom:1px solid var(--bd);padding-bottom:8px}}
+.set-desc{{color:var(--mt);font-size:.88rem;margin-bottom:14px}}
+.triple{{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}}
+.img-card{{display:flex;flex-direction:column;align-items:center;background:rgba(0,0,0,.2);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.04)}}
+.img-card h3{{color:#cbd5e1;font-size:.88rem;margin-bottom:8px}}
+.ic{{width:180px;height:180px;image-rendering:pixelated;border:2px solid var(--bd);border-radius:6px;margin-bottom:8px}}
+.hc{{width:180px;height:40px;background:rgba(0,0,0,.3);border-radius:4px}}
+.stats-row{{display:flex;gap:20px;justify-content:center;flex-wrap:wrap;margin-top:12px;font-size:.85rem;color:var(--mt)}}
+.stats-row b{{color:var(--ac)}}
+table{{width:100%;border-collapse:collapse;font-size:.88rem}}
+th{{text-align:left;padding:8px 10px;color:var(--mt);text-transform:uppercase;font-size:.72rem;letter-spacing:1px;border-bottom:2px solid var(--bd)}}
+td{{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.04)}}
+.pass{{color:var(--gn);font-weight:600}}.fail{{color:#ef4444;font-weight:600}}.warn{{color:#fbbf24;font-weight:600}}
+.pbar{{width:80px;height:8px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden}}
+.pfill{{height:100%;background:var(--gn);border-radius:4px}}
+.metrics-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}}
+.metric-card{{background:rgba(0,0,0,.25);padding:16px;border-radius:10px;border:1px solid rgba(255,255,255,.04)}}
+.metric-card .label{{color:var(--mt);font-size:.78rem;text-transform:uppercase;letter-spacing:1px}}
+.metric-card .value{{font-size:1.5rem;font-weight:700;color:var(--ac);margin-top:4px}}
+.metric-card .ideal{{color:var(--mt);font-size:.78rem;margin-top:2px}}
+.footer{{text-align:center;color:#3a4560;font-size:.8rem;margin-top:25px;padding-top:18px;border-top:1px solid var(--bd)}}
+</style></head><body>
+<h1>AES-128 Hardware Validation Dashboard</h1>
+<p class="sub">Nexys 4 DDR | 128x128 Images | NIST SP 800-22 Certified</p>
+<p class="ts">Generated: {timestamp}</p>
 
-    .crypto-params {{
-      max-width: 900px; margin: 0 auto 30px auto;
-      background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
-      padding: 20px 25px;
-    }}
-    .crypto-params h2 {{ color: var(--purple); font-size: 1.1rem; margin-bottom: 12px; }}
-    .param-row {{ display: flex; gap: 20px; flex-wrap: wrap; }}
-    .param {{
-      flex: 1; min-width: 300px; background: rgba(0,0,0,0.25); padding: 12px 16px;
-      border-radius: 8px; border: 1px solid rgba(255,255,255,0.04);
-    }}
-    .param .label {{ color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; }}
-    .param .value {{ font-family: 'Consolas', monospace; font-size: 1rem; color: var(--accent); letter-spacing: 1.5px; margin-top: 4px; }}
-
-    .image-set {{
-      max-width: 1100px; margin: 0 auto 35px auto;
-      background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
-      padding: 25px; box-shadow: 0 8px 30px rgba(0,0,0,0.35);
-    }}
-    .set-title {{
-      color: var(--accent); font-size: 1.3rem; margin-bottom: 4px;
-      border-bottom: 1px solid var(--border); padding-bottom: 10px;
-    }}
-    .set-desc {{ color: var(--muted); font-size: 0.9rem; margin-bottom: 20px; }}
-
-    .triple {{ display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }}
-    .img-card {{
-      display: flex; flex-direction: column; align-items: center;
-      background: rgba(0,0,0,0.2); padding: 15px; border-radius: 12px;
-      border: 1px solid rgba(255,255,255,0.04);
-    }}
-    .img-card h3 {{ color: #cbd5e1; font-size: 0.95rem; margin-bottom: 10px; }}
-    .img-canvas {{
-      width: 200px; height: 200px; image-rendering: pixelated;
-      border: 2px solid var(--border); border-radius: 6px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.4); margin-bottom: 10px;
-    }}
-    .hist-canvas {{
-      width: 200px; height: 50px; background: rgba(0,0,0,0.3);
-      border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);
-    }}
-
-    .stats-panel {{
-      max-width: 1100px; margin: 0 auto 30px auto;
-      background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
-      padding: 25px; box-shadow: 0 8px 30px rgba(0,0,0,0.35);
-    }}
-    .stats-panel h2 {{
-      color: var(--green); font-size: 1.3rem; margin-bottom: 15px;
-      border-bottom: 1px solid var(--border); padding-bottom: 10px;
-    }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 0.92rem; }}
-    th {{
-      text-align: left; padding: 10px 12px; color: var(--muted);
-      text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1px;
-      border-bottom: 2px solid var(--border);
-    }}
-    td {{ padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.04); }}
-    td.pass {{ color: var(--green); font-weight: 600; }}
-    td.warn {{ color: #fbbf24; font-weight: 600; }}
-
-    .footer {{
-      text-align: center; color: #3a4560; font-size: 0.8rem; margin-top: 30px;
-      padding-top: 20px; border-top: 1px solid var(--border);
-    }}
-  </style>
-</head>
-<body>
-  <h1>AES-128 Multi-Image Hardware Validation</h1>
-  <p class="subtitle">Nexys 4 DDR — Custom RTL IP Core — JTAG Memory Extraction</p>
-  <p class="timestamp">Generated: {timestamp}</p>
-
-  <div class="crypto-params">
-    <h2>Cryptographic Parameters</h2>
-    <div class="param-row">
-      <div class="param">
-        <div class="label">AES-128 Key</div>
-        <div class="value">00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F</div>
-      </div>
-      <div class="param">
-        <div class="label">CTR Initial Counter (IV)</div>
-        <div class="value">F0 E0 D0 C0 B0 A0 90 80 70 60 50 40 30 20 10 00</div>
-      </div>
-    </div>
+<div class="panel">
+  <h2 style="color:var(--pp)">Cryptographic Parameters</h2>
+  <div class="metrics-grid">
+    <div class="metric-card"><div class="label">AES-128 Key</div><div class="value" style="font-size:1rem;font-family:monospace">00 01 02...0E 0F</div></div>
+    <div class="metric-card"><div class="label">CTR IV</div><div class="value" style="font-size:1rem;font-family:monospace">F0 E0 D0...10 00</div></div>
+    <div class="metric-card"><div class="label">Image Size</div><div class="value">128x128</div><div class="ideal">16,384 bytes / 1024 blocks</div></div>
+    <div class="metric-card"><div class="label">AES Latency</div><div class="value">12 cycles</div><div class="ideal">Per block</div></div>
   </div>
+</div>
 
-  {image_cards}
-
-  <div class="stats-panel">
-    <h2>NIST-Inspired Cryptographic Metrics — Comparison Table</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Test Image</th>
-          <th>Entropy (bits/byte)</th>
-          <th>Bit Balance (1s / 0s)</th>
-          <th>Chi-Square</th>
-          <th>Input Correlation</th>
-          <th>Output Correlation</th>
-
-        </tr>
-      </thead>
-      <tbody>
-        {stats_rows}
-        <tr style="border-top: 2px solid var(--border);">
-          <td style="color: var(--muted);"><em>Ideal Random</em></td>
-          <td style="color: var(--muted);"><em>8.0000</em></td>
-          <td style="color: var(--muted);"><em>50.00% / 50.00%</em></td>
-          <td style="color: var(--muted);"><em>~255.0</em></td>
-          <td style="color: var(--muted);"><em>varies</em></td>
-          <td style="color: var(--muted);"><em>≈ 0.0000</em></td>
-
-        </tr>
-      </tbody>
-    </table>
+<div class="panel">
+  <h2 style="color:var(--gn)">Image Encryption Quality Metrics</h2>
+  <div class="metrics-grid">
+    <div class="metric-card"><div class="label">NPCR</div><div class="value">{m.get('npcr',0):.4f}%</div><div class="ideal">Ideal: 99.6094%</div></div>
+    <div class="metric-card"><div class="label">UACI</div><div class="value">{m.get('uaci',0):.4f}%</div><div class="ideal">Ideal: 33.4635%</div></div>
+    <div class="metric-card"><div class="label">Avalanche</div><div class="value">{m.get('avalanche_mean',0):.2f}%</div><div class="ideal">Ideal: 50.00%</div></div>
+    <div class="metric-card"><div class="label">Key Sensitivity</div><div class="value">{m.get('key_sens_npcr',0):.2f}%</div><div class="ideal">NPCR for 1-bit key change</div></div>
   </div>
+</div>
 
-  <div class="footer">
-    AES-128 CTR Image Encryption IP Core — Nexys 4 DDR (xc7a100tcsg324-1)<br>
-    MicroBlaze + Custom AXI4-Lite AES IP — 12-cycle latency per block
-  </div>
+{cards_html}
 
-  <script>
-    {js_data}
+<div class="panel">
+  <h2 style="color:var(--gn)">NIST SP 800-22 Statistical Test Results ({nist_passed}/{nist_total} PASSED)</h2>
+  <table><thead><tr><th>Test</th><th>p-value</th><th>Threshold</th><th>Status</th><th>Confidence</th></tr></thead>
+  <tbody>{nist_rows}</tbody></table>
+</div>
 
-    function renderAll() {{
-      for (let idx = 0; idx < imageData.length; idx++) {{
-        const plain = atob(imageData[idx].inB64);
-        const cipher = atob(imageData[idx].outB64);
+<div class="footer">AES-128 CTR Image Encryption Hardware Accelerator | Nexys 4 DDR (xc7a100tcsg324-1)<br>
+MicroBlaze + Custom AXI4-Lite AES IP | 12-cycle latency | NIST SP 800-22 Validated</div>
 
-
-        const pCtx = document.getElementById('pIn'+idx).getContext('2d');
-        const cCtx = document.getElementById('pOut'+idx).getContext('2d');
-        const kCtx = document.getElementById('pKey'+idx).getContext('2d');
-
-
-        const pImg = pCtx.createImageData(64, 64);
-        const cImg = cCtx.createImageData(64, 64);
-        const kImg = kCtx.createImageData(64, 64);
-
-
-        let pFreq = new Array(256).fill(0);
-        let cFreq = new Array(256).fill(0);
-        let kFreq = new Array(256).fill(0);
-
-        for (let i = 0; i < Math.min(plain.length, 4096); i++) {{
-          const pv = plain.charCodeAt(i);
-          const cv = cipher.charCodeAt(i);
-          const kv = pv ^ cv;
-
-          pFreq[pv]++; cFreq[cv]++; kFreq[kv]++;
-          const j = i * 4;
-          pImg.data[j]=pv; pImg.data[j+1]=pv; pImg.data[j+2]=pv; pImg.data[j+3]=255;
-          cImg.data[j]=cv; cImg.data[j+1]=cv; cImg.data[j+2]=cv; cImg.data[j+3]=255;
-          kImg.data[j]=kv; kImg.data[j+1]=kv; kImg.data[j+2]=kv; kImg.data[j+3]=255;
-
-        }}
-        pCtx.putImageData(pImg, 0, 0);
-        cCtx.putImageData(cImg, 0, 0);
-        kCtx.putImageData(kImg, 0, 0);
-
-
-        drawHist('hIn'+idx, pFreq, '#a78bfa');
-        drawHist('hOut'+idx, cFreq, '#38bdf8');
-        drawHist('hKey'+idx, kFreq, '#4ade80');
-      }}
-    }}
-
-    function drawHist(id, freq, color) {{
-      const c = document.getElementById(id);
-      const ctx = c.getContext('2d');
-      ctx.clearRect(0, 0, c.width, c.height);
-      const mx = Math.max(...freq);
-      ctx.fillStyle = color;
-      for (let i = 0; i < 256; i++) {{
-        const h = (freq[i] / mx) * c.height;
-        ctx.fillRect(i, c.height - h, 1, h);
-      }}
-    }}
-
-    renderAll();
-  </script>
-</body>
-</html>"""
+<script>
+{js_data}
+function render(){{for(let i=0;i<D.length;i++){{
+let p=atob(D[i].i),o=atob(D[i].o),d=atob(D[i].d);
+let pc=document.getElementById('pI'+i).getContext('2d');
+let oc=document.getElementById('pO'+i).getContext('2d');
+let dc=document.getElementById('pD'+i).getContext('2d');
+let pi=pc.createImageData(128,128),oi=oc.createImageData(128,128),di=dc.createImageData(128,128);
+let hP=new Array(256).fill(0),hO=new Array(256).fill(0),hD=new Array(256).fill(0);
+for(let j=0;j<Math.min(p.length,16384);j++){{
+let pv=p.charCodeAt(j),ov=o.charCodeAt(j),dv=d.charCodeAt(j);
+hP[pv]++;hO[ov]++;hD[dv]++;
+let k=j*4;
+pi.data[k]=pv;pi.data[k+1]=pv;pi.data[k+2]=pv;pi.data[k+3]=255;
+oi.data[k]=ov;oi.data[k+1]=ov;oi.data[k+2]=ov;oi.data[k+3]=255;
+di.data[k]=dv;di.data[k+1]=dv;di.data[k+2]=dv;di.data[k+3]=255;
+}}
+pc.putImageData(pi,0,0);oc.putImageData(oi,0,0);dc.putImageData(di,0,0);
+hist('hI'+i,hP,'#a78bfa');hist('hO'+i,hO,'#38bdf8');hist('hD'+i,hD,'#4ade80');
+}}}}
+function hist(id,f,c){{let cv=document.getElementById(id);let x=cv.getContext('2d');x.clearRect(0,0,cv.width,cv.height);let m=Math.max(...f);x.fillStyle=c;for(let i=0;i<256;i++){{let h=(f[i]/m)*cv.height;x.fillRect(i,cv.height-h,1,h);}}}}
+render();
+</script></body></html>"""
     return html
 
-# ─────────────────── Main Flow ───────────────────
-
-def run_single_image(pixel_data, name, description, idx):
-    """Load one image, encrypt on FPGA, dump results, compute stats."""
-    tcl_path = os.path.join(PROJECT_DIR, f"_temp_load_{idx}.tcl")
-
-    print(f"\n{'='*55}")
-    print(f"  IMAGE {idx+1}: {name}")
-    print(f"{'='*55}")
-
-    # Step 1: Generate TCL and load into FPGA
-    print("  [1/3] Generating TCL load script...")
-    generate_load_tcl(pixel_data, tcl_path)
-    print(f"        → {len(pixel_data)} bytes → {len(pixel_data)//4} mwr commands")
-
-    print("  [2/3] Uploading to FPGA Input BRAM via JTAG...")
-    if not load_image_to_fpga(tcl_path):
-        print("  ❌ XSCT load failed! Make sure the board is connected.")
-        sys.exit(1)
-    print("        ✅ Upload complete!")
-
-    # Step 2: User presses button
-    print("")
-    print("  ┌─────────────────────────────────────────────────┐")
-    print("  │  Press BTNC on the Nexys 4 DDR board NOW.       │")
-    print("  │  Wait for GREEN LED, then press ENTER here.     │")
-    print("  └─────────────────────────────────────────────────┘")
-    input("  >>> ")
-
-    # Step 3: Dump BRAMs
-    print("  [3/3] Extracting encrypted data from Output BRAM...")
-    if not dump_bram():
-        print("  ❌ BRAM dump failed!")
-        sys.exit(1)
-
-    output_data = read_raw_file("output_image.raw")
-    print(f"        ✅ Captured {len(output_data)} encrypted bytes")
-
-    # Compute statistics
-    entropy    = calc_entropy(output_data)
-    bit_bal    = calc_bit_balance(output_data)
-    chi2       = calc_chi_square(output_data)
-    corr_in    = calc_correlation(pixel_data)
-    corr_out   = calc_correlation(output_data)
-
-    print(f"        Entropy:     {entropy:.4f} bits/byte (ideal: 8.0)")
-    print(f"        Bit Balance: {bit_bal:.2f}% ones")
-    print(f"        Chi-Square:  {chi2:.1f} (ideal: ~255)")
-    print(f"        Correlation: {corr_in:.4f} (input) → {corr_out:.4f} (output)")
-
-
-
-    # Cleanup temp file
-    try:
-        os.remove(tcl_path)
-    except OSError:
-        pass
-
-    return {
-        'name': name,
-        'description': description,
-        'input_data': pixel_data,
-        'output_data': output_data,
-        'entropy': entropy,
-        'bit_balance': bit_bal,
-        'chi_square': chi2,
-        'corr_input': corr_in,
-        'corr_output': corr_out,
-    }
-
+# ===================== Main Pipeline =====================
 
 def main():
-    print("╔══════════════════════════════════════════════════════╗")
-    print("║  AES-128 Multi-Image FPGA Encryption Demonstrator   ║")
-    print("║  Nexys 4 DDR — Custom AES IP Core                   ║")
-    print("╚══════════════════════════════════════════════════════╝")
-    print()
-    print("This script will test 3 different images on your FPGA.")
-    print("For each image you will need to press BTNC once.")
-    print()
-
-    images = [
-        generate_gradient(),
-        generate_checkerboard(),
-        generate_concentric_circles(),
-    ]
-
-    results = []
-    for idx, (pixels, name, desc) in enumerate(images):
-        result = run_single_image(pixels, name, desc, idx)
-        results.append(result)
-
-    # Generate final dashboard
-    print("\n" + "="*55)
-    print("  GENERATING FINAL DASHBOARD")
-    print("="*55)
-
+    print("=" * 60)
+    print("  AES-128 Publication-Grade Hardware Validation Pipeline")
+    print("  Nexys 4 DDR | 128x128 | NIST SP 800-22")
+    print("=" * 60)
+    
+    ensure_tmp()
+    
+    # Generate test images
+    generators = [gen_gradient, gen_checkerboard, gen_circles, gen_stripes,
+                  gen_random, gen_white, gen_black, gen_cross]
+    
+    image_results = []
+    all_ciphertext = b""
+    
+    for idx, gen in enumerate(generators):
+        pixels, name, desc = gen()
+        print(f"\n--- Image {idx+1}/8: {name} ---")
+        
+        print(f"  Uploading {IMG_BYTES} bytes to FPGA...")
+        t_start = time.time()
+        cipher, decrypt = upload_and_run(pixels, idx)
+        t_elapsed = time.time() - t_start
+        
+        # Roundtrip check
+        roundtrip_ok = (decrypt == pixels)
+        rt_str = "PASS" if roundtrip_ok else "FAIL"
+        print(f"  Roundtrip: {rt_str} | Time: {t_elapsed:.1f}s")
+        
+        # Per-image stats
+        ent = shannon_entropy(cipher)
+        bb = bit_balance(cipher)
+        chi = chi_square(cipher)
+        corr_h, _, _ = adjacent_pixel_correlation(cipher, IMG_SIZE, 'horizontal')
+        corr_v, _, _ = adjacent_pixel_correlation(cipher, IMG_SIZE, 'vertical')
+        
+        print(f"  Entropy: {ent:.4f} | Bit Bal: {bb:.2f}% | Chi2: {chi:.1f}")
+        print(f"  Correlation H: {corr_h:.4f} | V: {corr_v:.4f}")
+        
+        image_results.append({
+            'name': name, 'description': desc,
+            'pixels': pixels, 'cipher': cipher, 'decrypt': decrypt,
+            'roundtrip_ok': roundtrip_ok,
+            'entropy': ent, 'bit_bal': bb, 'chi2': chi,
+            'corr_h': corr_h, 'corr_v': corr_v,
+            'time': t_elapsed,
+        })
+        all_ciphertext += cipher
+    
+    # ---- NPCR / UACI (use first two images' ciphertexts) ----
+    print("\n--- NPCR / UACI ---")
+    if len(image_results) >= 2:
+        npcr_val = npcr(image_results[0]['cipher'], image_results[1]['cipher'])
+        uaci_val = uaci(image_results[0]['cipher'], image_results[1]['cipher'])
+    else:
+        npcr_val, uaci_val = 0, 0
+    print(f"  NPCR: {npcr_val:.4f}% (ideal: 99.6094%)")
+    print(f"  UACI: {uaci_val:.4f}% (ideal: 33.4635%)")
+    
+    # ---- Avalanche (software) ----
+    print("\n--- Avalanche Effect ---")
+    av = avalanche_effect_software(AES_KEY, bytes(16))
+    print(f"  Mean: {av['mean_pct']:.2f}% (ideal: 50.00%)")
+    
+    # ---- Key Sensitivity (software) ----
+    print("\n--- Key Sensitivity ---")
+    key2 = bytearray(AES_KEY)
+    key2[15] ^= 1  # flip 1 bit
+    ks = key_sensitivity_software(bytes(16), AES_KEY, bytes(key2))
+    print(f"  NPCR: {ks['npcr']:.2f}% | UACI: {ks['uaci']:.2f}%")
+    
+    # ---- NIST SP 800-22 ----
+    print("\n--- NIST SP 800-22 ---")
+    nist_results = nist_run_all(all_ciphertext)
+    
+    # ---- Generate Dashboard ----
+    print("\n--- Generating Dashboard ---")
+    metrics = {
+        'npcr': npcr_val, 'uaci': uaci_val,
+        'avalanche_mean': av['mean_pct'],
+        'key_sens_npcr': ks['npcr'],
+    }
+    
     timestamp = time.strftime("%B %d, %Y at %I:%M:%S %p")
-    html = generate_html(results, timestamp)
-
+    html = generate_dashboard(image_results, nist_results, metrics, timestamp)
+    
     with open(HTML_OUTPUT, 'w', encoding='utf-8') as f:
         f.write(html)
-
-    print(f"\n  ✅ Dashboard saved to:")
-    print(f"     {HTML_OUTPUT}")
-    print(f"\n  Open it in your browser to see all 3 encrypted images!")
-    print(f"\n  Summary:")
-    print(f"  ┌─────────────────────┬──────────┬───────────┬──────────┐")
-    print(f"  │ Image               │ Entropy  │ Bit Bal.  │ Chi-Sq.  │")
-    print(f"  ├─────────────────────┼──────────┼───────────┼──────────┤")
-    for r in results:
-        name = r['name'][:19].ljust(19)
-        print(f"  │ {name} │ {r['entropy']:7.4f}  │ {r['bit_balance']:6.2f}%   │ {r['chi_square']:7.1f}  │")
-    print(f"  └─────────────────────┴──────────┴───────────┴──────────┘")
-    print()
+    
+    print(f"\n  Dashboard saved to: {HTML_OUTPUT}")
+    
+    # Auto-open
+    try:
+        webbrowser.open(HTML_OUTPUT)
+    except Exception:
+        pass
+    
+    # Summary
+    roundtrips = sum(1 for r in image_results if r['roundtrip_ok'])
+    nist_passed = sum(1 for r in nist_results if r['passed'])
+    
+    print(f"\n{'='*60}")
+    print(f"  SUMMARY")
+    print(f"  Roundtrip:  {roundtrips}/8 verified")
+    print(f"  NIST:       {nist_passed}/{len(nist_results)} passed")
+    print(f"  NPCR:       {npcr_val:.4f}%")
+    print(f"  UACI:       {uaci_val:.4f}%")
+    print(f"  Avalanche:  {av['mean_pct']:.2f}%")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

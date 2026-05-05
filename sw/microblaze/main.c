@@ -1,27 +1,17 @@
 /*
- * main.c  –  AES-128 CTR Mode Image Encryption
+ * main.c  --  AES-128 CTR Mode Image Encryption + Decryption
  * MicroBlaze / Vitis application for Nexys 4 DDR
  *
- * Flow:
- *  1. Wait for BTNC press (GPIO2 input bit 0)
- *  2. LED16_R = ON  (running)
- *  3. Write AES key to AES IP
- *  4. For each of 256 16-byte image blocks:
- *       a. Read 16 bytes from Input BRAM
- *       b. Write counter block to AES IP, start, wait done
- *       c. Read keystream from AES IP
- *       d. XOR keystream with image block → cipher block
- *       e. Write cipher block to Output BRAM
- *       f. Print "BLOCK NNN: <32 hex chars>" via UART
- *       g. Increment counter (big-endian, byte 15 = LSB)
- *  5. LED16_G = ON, LED16_R = OFF
- *  6. Print "DONE" and loop forever
+ * Flow (auto-starts on processor reset, no button wait):
+ *  1. LED16_R = ON  (encrypting)
+ *  2. Encrypt 1024 blocks from Input BRAM -> Output BRAM (CTR mode)
+ *  3. LED16_B = ON  (decrypting)
+ *  4. Decrypt 1024 blocks from Output BRAM -> Decrypt BRAM (CTR mode)
+ *  5. Verify: compare Input BRAM vs Decrypt BRAM word-by-word
+ *  6. LED16_G = ON if match, LED16_R blink if mismatch
  *
- * UART format (115200 8N1):
- *   BLOCK 000: 3A1B7F...  (32 hex chars = 16 bytes)
- *   ...
- *   BLOCK 255: ...
- *   DONE
+ * Image: 128 x 128 grayscale = 16,384 bytes = 1024 AES blocks
+ * Data is loaded into Input BRAM via JTAG (mwr -bin -file) before reset.
  */
 
 #include <stdint.h>
@@ -32,13 +22,14 @@
 #include "aes_ip_driver.h"
 
 /* ---- Project constants ---- */
-#define IMAGE_BYTES      4096U   /* 64 × 64 grayscale */
+#define IMAGE_BYTES      16384U  /* 128 x 128 grayscale */
 #define BLOCK_BYTES      16U
-#define NUM_BLOCKS       (IMAGE_BYTES / BLOCK_BYTES)  /* 256 */
+#define NUM_BLOCKS       (IMAGE_BYTES / BLOCK_BYTES)  /* 1024 */
 
-/* Input/Output BRAM base addresses (from xparameters.h after HW export) */
+/* Input/Output/Decrypt BRAM base addresses (from xparameters.h) */
 #define INPUT_BRAM_BASE   XPAR_AXI_BRAM_CTRL_0_BASEADDR
 #define OUTPUT_BRAM_BASE  XPAR_AXI_BRAM_CTRL_1_BASEADDR
+#define DECRYPT_BRAM_BASE XPAR_AXI_BRAM_CTRL_2_BASEADDR
 
 /* GPIO base address */
 #define GPIO_BASEADDR     XPAR_AXI_GPIO_0_BASEADDR
@@ -52,10 +43,6 @@
 #define LED16_R_BIT  (1U << 1)
 #define LED16_G_BIT  (1U << 2)
 
-/* GPIO input bit assignments */
-#define BTNC_BIT     (1U << 0)
-#define BTND_BIT     (1U << 1)
-
 /* ---- AES-128 demo key: 00 01 02 ... 0F ---- */
 static const uint8_t AES_KEY[16] = {
     0x00,0x01,0x02,0x03, 0x04,0x05,0x06,0x07,
@@ -63,8 +50,7 @@ static const uint8_t AES_KEY[16] = {
 };
 
 /* ---- Initial counter (big-endian, MSB at [0]) ---- */
-/* matches software_reference_ctr.py default: F0E0D0C0B0A090807060504030201000 */
-static uint8_t ctr[16] = {
+static const uint8_t INIT_CTR[16] = {
     0xF0,0xE0,0xD0,0xC0, 0xB0,0xA0,0x90,0x80,
     0x70,0x60,0x50,0x40, 0x30,0x20,0x10,0x00
 };
@@ -89,10 +75,6 @@ static void led_set(uint32_t bits) {
     Xil_Out32(GPIO_DATA_OUT, bits);
 }
 
-static uint32_t btn_read(void) {
-    return Xil_In32(GPIO2_DATA_IN);
-}
-
 /* ---- Read 16 bytes from BRAM at byte offset ---- */
 static void bram_read_block(uint32_t base, uint32_t byte_offset, uint8_t out[16]) {
     uint32_t i, w;
@@ -115,74 +97,106 @@ static void bram_write_block(uint32_t base, uint32_t byte_offset, const uint8_t 
     }
 }
 
-/* ===================================================================== */
-int main(void)
-{
-    uint32_t blk_idx;
-    uint8_t  plain[16], keystream[16], cipher[16];
-    uint8_t  ctr_copy[16];
-    uint32_t i;
+/* ---- CTR encrypt/decrypt a full image between two BRAMs ---- */
+static void ctr_process(uint32_t src_base, uint32_t dst_base) {
+    uint8_t ctr_copy[16];
+    uint8_t block_in[16], keystream[16], block_out[16];
+    uint32_t blk_idx, i;
 
-    xil_printf("\r\n");
-    xil_printf("==============================================\r\n");
-    xil_printf(" AES-128 CTR Image Encryption  –  Nexys 4 DDR\r\n");
-    xil_printf(" Key : 000102030405060708090A0B0C0D0E0F\r\n");
-    xil_printf(" CTR0: F0E0D0C0B0A090807060504030201000\r\n");
-    xil_printf(" Press BTNC (center) to start encryption...\r\n");
-    xil_printf("==============================================\r\n");
+    memcpy(ctr_copy, INIT_CTR, 16);
 
-    gpio_init();
-    led_set(LED0_BIT); /* LED0 on = waiting for button */
-
-    /* Wait for BTNC */
-    while (!(btn_read() & BTNC_BIT)) { /* spin */ }
-    /* Debounce */
-    for (volatile int d = 0; d < 500000; d++) {}
-    while (btn_read() & BTNC_BIT) {}   /* wait release */
-
-    xil_printf("Starting encryption...\r\n");
-    led_set(LED16_R_BIT); /* Red = running */
-    /* Vitis rebuild trigger comment */
-
-    /* Write AES key once (key doesn't change per block in CTR) */
-    AES_WriteKey(AES_KEY);
-
-    /* Reset counter to initial value */
-    memcpy(ctr_copy, ctr, 16);
-
-    /* ---- Process all 256 blocks ---- */
     for (blk_idx = 0; blk_idx < NUM_BLOCKS; blk_idx++) {
         uint32_t byte_off = blk_idx * BLOCK_BYTES;
 
-        /* 1. Read 16 plaintext bytes from Input BRAM */
-        bram_read_block(INPUT_BRAM_BASE, byte_off, plain);
+        /* Read source block */
+        bram_read_block(src_base, byte_off, block_in);
 
-        /* 2. Encrypt counter block using AES IP */
+        /* Encrypt counter block using AES IP */
         AES_WriteDataIn(ctr_copy);
         AES_Start();
         AES_WaitDone();
         AES_ReadDataOut(keystream);
 
-        /* 3. XOR keystream with plaintext → ciphertext */
-        for (i = 0; i < 16; i++) cipher[i] = plain[i] ^ keystream[i];
+        /* XOR keystream with source -> destination */
+        for (i = 0; i < 16; i++) block_out[i] = block_in[i] ^ keystream[i];
 
-        /* 4. Write ciphertext to Output BRAM */
-        bram_write_block(OUTPUT_BRAM_BASE, byte_off, cipher);
+        /* Write to destination BRAM */
+        bram_write_block(dst_base, byte_off, block_out);
 
-        /* 5. Increment counter */
+        /* Increment counter */
         counter_increment(ctr_copy);
+    }
+}
 
-        /* 6. Print block over UART */
-        xil_printf("BLOCK %03lu: ", (unsigned long)blk_idx);
-        for (i = 0; i < 16; i++) xil_printf("%02X", cipher[i]);
-        xil_printf("\r\n");
+/* ===================================================================== */
+int main(void)
+{
+    uint32_t i, mismatch_count;
+
+    gpio_init();
+
+    xil_printf("\r\n");
+    xil_printf("==============================================\r\n");
+    xil_printf(" AES-128 CTR Encrypt+Decrypt  -  Nexys 4 DDR\r\n");
+    xil_printf(" Image : 128x128 (16384 bytes, 1024 blocks)\r\n");
+    xil_printf(" Key   : 000102030405060708090A0B0C0D0E0F\r\n");
+    xil_printf(" CTR0  : F0E0D0C0B0A090807060504030201000\r\n");
+    xil_printf("==============================================\r\n");
+
+    /* ---- Phase 1: ENCRYPT (Input BRAM -> Output BRAM) ---- */
+    xil_printf("Phase 1: Encrypting...\r\n");
+    led_set(LED16_R_BIT);  /* Red = encrypting */
+
+    /* Write AES key */
+    AES_WriteKey(AES_KEY);
+
+    /* CTR encrypt */
+    ctr_process(INPUT_BRAM_BASE, OUTPUT_BRAM_BASE);
+
+    xil_printf("Encryption complete. 1024 blocks processed.\r\n");
+
+    /* ---- Phase 2: DECRYPT (Output BRAM -> Decrypt BRAM) ---- */
+    xil_printf("Phase 2: Decrypting...\r\n");
+    led_set(LED16_R_BIT | LED16_G_BIT);  /* Yellow = decrypting */
+
+    /* CTR decrypt (same operation, same key, same initial counter) */
+    ctr_process(OUTPUT_BRAM_BASE, DECRYPT_BRAM_BASE);
+
+    xil_printf("Decryption complete. 1024 blocks processed.\r\n");
+
+    /* ---- Phase 3: VERIFY (Input BRAM vs Decrypt BRAM) ---- */
+    xil_printf("Phase 3: Verifying roundtrip...\r\n");
+    mismatch_count = 0;
+
+    for (i = 0; i < IMAGE_BYTES; i += 4) {
+        uint32_t original  = Xil_In32(INPUT_BRAM_BASE + i);
+        uint32_t recovered = Xil_In32(DECRYPT_BRAM_BASE + i);
+        if (original != recovered) {
+            mismatch_count++;
+            if (mismatch_count <= 4) {
+                xil_printf("MISMATCH at offset 0x%04lX: orig=0x%08lX recv=0x%08lX\r\n",
+                           (unsigned long)i, (unsigned long)original, (unsigned long)recovered);
+            }
+        }
     }
 
-    /* Done */
-    led_set(LED16_G_BIT); /* Green = done */
+    if (mismatch_count == 0) {
+        led_set(LED16_G_BIT);  /* Green = verified */
+        xil_printf("VERIFY: PASS - Roundtrip byte-perfect match!\r\n");
+    } else {
+        /* Blink red for error */
+        xil_printf("VERIFY: FAIL - %lu word mismatches detected!\r\n",
+                   (unsigned long)mismatch_count);
+        while (1) {
+            led_set(LED16_R_BIT);
+            for (volatile int d = 0; d < 500000; d++) {}
+            led_set(0);
+            for (volatile int d = 0; d < 500000; d++) {}
+        }
+    }
+
+    xil_printf("==============================================\r\n");
     xil_printf("DONE\r\n");
-    xil_printf("Encrypted %u bytes (%u blocks) successfully.\r\n",
-               (unsigned)IMAGE_BYTES, (unsigned)NUM_BLOCKS);
 
     while (1) { /* hang */ }
     return 0;

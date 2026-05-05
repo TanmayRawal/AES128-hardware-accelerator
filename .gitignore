@@ -50,6 +50,9 @@ docs/
 capture_output/
 scripts/capture_output/
 
+# === Pipeline temp ===
+_tmp/
+
 # === OS Files ===
 *.tmp
 *.bak
